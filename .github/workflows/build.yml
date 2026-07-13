@@ -1,0 +1,136 @@
+name: Build BeyuOS ISO
+
+on:
+  workflow_dispatch: # Bu satır, ISO'yu tek tıkla elle başlatmamızı sağlar.
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space (Kusursuz Alan Optimizasyonu)
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/powershell
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xorriso squashfs-tools aria2
+
+      - name: Download Base ISO (Linux Mint Cinnamon)
+        run: |
+          aria2c -x 16 -s 16 https://mirrors.kernel.org/linuxmint/stable/21.3/linuxmint-21.3-cinnamon-64bit.iso -o mint.iso
+
+      - name: Extract SquashFS
+        run: |
+          xorriso -osirrox on -indev mint.iso -extract /casper/filesystem.squashfs filesystem.squashfs
+          sudo unsquashfs -d squashfs-root filesystem.squashfs
+          rm filesystem.squashfs
+
+      - name: Customize System (Chroot İle BeyuOS Kimliği Enjeksiyonu)
+        run: |
+          sudo mkdir -p squashfs-root/usr/share/pixmaps/
+          sudo cp logo.png.jpeg squashfs-root/usr/share/pixmaps/logo.png.jpeg
+          
+          cat << 'EOF' | sudo chroot squashfs-root /bin/bash
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y wget chafa
+          
+          # Fastfetch'in en kararlı sürümünü indir ve kur
+          wget https://github.com/fastfetch-cli/fastfetch/releases/download/2.16.0/fastfetch-linux-amd64.deb
+          dpkg -i fastfetch-linux-amd64.deb || apt-get install -f -y
+          rm fastfetch-linux-amd64.deb
+          
+          # Sistem Kimliklerini BeyuOS Yapma
+          echo "BeyuOS" > /etc/hostname
+          
+          cat << 'INNER' > /etc/os-release
+          NAME="BeyuOS"
+          VERSION="1.0 (Nature Edition)"
+          ID=beyuos
+          ID_LIKE="ubuntu debian mint"
+          PRETTY_NAME="BeyuOS 1.0"
+          VERSION_ID="1.0"
+          HOME_URL="https://github.com/"
+          SUPPORT_URL="https://github.com/"
+          BUG_REPORT_URL="https://github.com/"
+          PRIVACY_POLICY_URL="https://github.com/"
+          VERSION_CODENAME=nature
+          UBUNTU_CODENAME=jammy
+          INNER
+          
+          cat << 'INNER' > /etc/lsb-release
+          DISTRIB_ID=BeyuOS
+          DISTRIB_RELEASE=1.0
+          DISTRIB_CODENAME=nature
+          DISTRIB_DESCRIPTION="BeyuOS 1.0 (Nature Edition)"
+          INNER
+          
+          # Terminal her açıldığında Doğa Temalı Fastfetch ve Logonun Gelmesi
+          mkdir -p /etc/skel/.config/fastfetch
+          cat << 'INNER' > /etc/skel/.config/fastfetch/config.jsonc
+          {
+            "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+            "logo": {
+              "source": "/usr/share/pixmaps/logo.png.jpeg",
+              "type": "chafa",
+              "width": 28,
+              "height": 12
+            },
+            "modules": [
+              "title",
+              "separator",
+              "os",
+              "kernel",
+              "uptime",
+              "packages",
+              "shell",
+              "de",
+              "wm",
+              "theme",
+              "terminal",
+              "memory"
+            ]
+          }
+          INNER
+          
+          echo 'if [ -x /usr/bin/fastfetch ]; then fastfetch; fi' >> /etc/skel/.bashrc
+          EOF
+
+      - name: Re-pack SquashFS
+        run: |
+          sudo mksquashfs squashfs-root new_filesystem.squashfs -comp xz -b 1M -noappend
+          sudo rm -rf squashfs-root
+
+      - name: Extract and Patch Boot Bootloader (BIOS/Açılış Ekranı Değişimi)
+        run: |
+          xorriso -osirrox on -indev mint.iso -extract /boot/grub/grub.cfg grub.cfg || true
+          xorriso -osirrox on -indev mint.iso -extract /isolinux/isolinux.cfg isolinux.cfg || true
+          [ -f grub.cfg ] && sed -i 's/Linux Mint/BeyuOS/g' grub.cfg
+          [ -f isolinux.cfg ] && sed -i 's/Linux Mint/BeyuOS/g' isolinux.cfg
+
+      - name: Build Final BeyuOS ISO (Kusursuz Boot Kilidi Koruyucu)
+        run: |
+          XORRISO_CMD=(xorriso -dev mint.iso -boot_image any keep -rm /casper/filesystem.squashfs -- -add new_filesystem.squashfs /casper/filesystem.squashfs --)
+          if [ -f grub.cfg ]; then
+            XORRISO_CMD+=(-update grub.cfg /boot/grub/grub.cfg)
+          fi
+          if [ -f isolinux.cfg ]; then
+            XORRISO_CMD+=(-update isolinux.cfg /isolinux/isolinux.cfg)
+          fi
+          XORRISO_CMD+=(-output BeyuOS-1.0-Cinnamon-amd64.iso)
+          sudo "${XORRISO_CMD[@]}"
+
+      - name: Upload BeyuOS ISO Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BeyuOS-ISO
+          path: BeyuOS-1.0-Cinnamon-amd64.iso
+          retention-days: 5
